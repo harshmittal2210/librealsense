@@ -31,6 +31,8 @@
 #include "proc/hole-filling-filter.h"
 #include "proc/color-formats-converter.h"
 #include "proc/rates-printer.h"
+#include "proc/hdr-merge.h"
+#include "proc/sequence-id-filter.h"
 #include "media/playback/playback_device.h"
 #include "stream.h"
 #include "../include/librealsense2/h/rs_types.h"
@@ -328,6 +330,16 @@ rs2_stream_profile_list* rs2_get_stream_profiles(rs2_sensor* sensor, rs2_error**
     return new rs2_stream_profile_list{ sensor->sensor->get_stream_profiles() };
 }
 HANDLE_EXCEPTIONS_AND_RETURN(nullptr, sensor)
+
+rs2_stream_profile_list * rs2_get_debug_stream_profiles( rs2_sensor * sensor,
+                                                   rs2_error ** error ) BEGIN_API_CALL
+{
+    VALIDATE_NOT_NULL( sensor );
+    auto debug_streaming
+        = VALIDATE_INTERFACE( sensor->sensor, librealsense::debug_stream_sensor );
+    return new rs2_stream_profile_list{ debug_streaming->get_debug_stream_profiles() };
+}
+HANDLE_EXCEPTIONS_AND_RETURN( nullptr, sensor )
 
 rs2_stream_profile_list* rs2_get_active_streams(rs2_sensor* sensor, rs2_error** error) BEGIN_API_CALL
 {
@@ -1254,6 +1266,7 @@ const char* rs2_option_to_string(rs2_option option)                             
 const char* rs2_camera_info_to_string(rs2_camera_info info)                               { return librealsense::get_string(info);         }
 const char* rs2_timestamp_domain_to_string(rs2_timestamp_domain info)                     { return librealsense::get_string(info);         }
 const char* rs2_notification_category_to_string(rs2_notification_category category)       { return librealsense::get_string(category);     }
+const char* rs2_calib_target_type_to_string(rs2_calib_target_type type)                   { return librealsense::get_string(type);         }
 const char* rs2_sr300_visual_preset_to_string(rs2_sr300_visual_preset preset)             { return librealsense::get_string(preset);       }
 const char* rs2_log_severity_to_string(rs2_log_severity severity)                         { return librealsense::get_string(severity);     }
 const char* rs2_exception_type_to_string(rs2_exception_type type)                         { return librealsense::get_string(type);         }
@@ -1265,9 +1278,11 @@ const char* rs2_frame_metadata_value_to_string(rs2_frame_metadata_value metadata
 const char* rs2_l500_visual_preset_to_string(rs2_l500_visual_preset preset)               { return get_string(preset); }
 const char* rs2_sensor_mode_to_string(rs2_sensor_mode mode)                               { return get_string(mode); }
 const char* rs2_ambient_light_to_string( rs2_ambient_light ambient )                      { return get_string(ambient); }
+const char* rs2_digital_gain_to_string(rs2_digital_gain gain)                             { return get_string(gain); }
 const char* rs2_cah_trigger_to_string( rs2_cah_trigger mode )                             { return get_string(mode); }
 const char* rs2_calibration_type_to_string(rs2_calibration_type type)                     { return get_string(type); }
 const char* rs2_calibration_status_to_string(rs2_calibration_status status)               { return get_string(status); }
+const char* rs2_host_perf_mode_to_string(rs2_host_perf_mode mode)                         { return get_string(mode); }
 
 void rs2_log_to_console(rs2_log_severity min_severity, rs2_error** error) BEGIN_API_CALL
 {
@@ -1289,6 +1304,18 @@ void rs2_log_to_callback_cpp( rs2_log_severity min_severity, rs2_log_callback * 
     );
 }
 HANDLE_EXCEPTIONS_AND_RETURN( , min_severity, callback )
+
+void rs2_reset_logger( rs2_error** error) BEGIN_API_CALL
+{
+    librealsense::reset_logger();
+}
+NOARGS_HANDLE_EXCEPTIONS_AND_RETURN_VOID()
+
+void rs2_enable_rolling_log_file( unsigned max_size, rs2_error ** error ) BEGIN_API_CALL
+{
+    librealsense::enable_rolling_log_file( max_size );
+}
+HANDLE_EXCEPTIONS_AND_RETURN(, max_size)
 
 // librealsense wrapper around a C function
 class on_log_callback : public rs2_log_callback
@@ -1335,7 +1362,7 @@ unsigned rs2_get_log_message_line_number( rs2_log_message const* msg, rs2_error*
 {
     VALIDATE_NOT_NULL( msg );
     log_message const& wrapper = *(log_message const*) (msg);
-    return wrapper.el_msg.line();
+    return wrapper.get_log_message_line_number();
 }
 HANDLE_EXCEPTIONS_AND_RETURN( 0, msg )
 
@@ -1343,7 +1370,7 @@ const char* rs2_get_log_message_filename( rs2_log_message const* msg, rs2_error*
 {
     VALIDATE_NOT_NULL( msg );
     log_message const& wrapper = *(log_message const*) (msg);
-    return wrapper.el_msg.file().c_str();
+    return wrapper.get_log_message_filename();
 }
 HANDLE_EXCEPTIONS_AND_RETURN( nullptr, msg )
 
@@ -1351,7 +1378,7 @@ const char* rs2_get_raw_log_message( rs2_log_message const* msg, rs2_error** err
 {
     VALIDATE_NOT_NULL( msg );
     log_message const & wrapper = *( log_message const * )( msg );
-    return wrapper.el_msg.message().c_str();
+    return wrapper.get_raw_log_message();
 }
 HANDLE_EXCEPTIONS_AND_RETURN( nullptr, msg )
 
@@ -1359,12 +1386,7 @@ const char* rs2_get_full_log_message( rs2_log_message const* msg, rs2_error** er
 {
     VALIDATE_NOT_NULL( msg );
     log_message & wrapper = *( log_message * )( msg );
-    if( wrapper.built_msg.empty() )
-    {
-        bool const append_new_line = false;
-        wrapper.built_msg = wrapper.el_msg.logger()->logBuilder()->build( &wrapper.el_msg, append_new_line );
-    }
-    return wrapper.built_msg.c_str();
+    return wrapper.get_full_log_message();
 }
 HANDLE_EXCEPTIONS_AND_RETURN( nullptr, msg )
 
@@ -1375,21 +1397,24 @@ int rs2_is_sensor_extendable_to(const rs2_sensor* sensor, rs2_extension extensio
     VALIDATE_ENUM(extension_type);
     switch (extension_type)
     {
-    case RS2_EXTENSION_DEBUG               : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::debug_interface)        != nullptr;
-    case RS2_EXTENSION_INFO                : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::info_interface)         != nullptr;
-    case RS2_EXTENSION_OPTIONS             : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::options_interface)      != nullptr;
-    case RS2_EXTENSION_VIDEO               : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::video_sensor_interface) != nullptr;
-    case RS2_EXTENSION_ROI                 : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::roi_sensor_interface)   != nullptr;
-    case RS2_EXTENSION_DEPTH_SENSOR        : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::depth_sensor)           != nullptr;
-    case RS2_EXTENSION_DEPTH_STEREO_SENSOR : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::depth_stereo_sensor)    != nullptr;
-    case RS2_EXTENSION_SOFTWARE_SENSOR     : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::software_sensor)        != nullptr;
-    case RS2_EXTENSION_POSE_SENSOR         : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::pose_sensor_interface)  != nullptr;
-    case RS2_EXTENSION_WHEEL_ODOMETER      : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::wheel_odometry_interface)!= nullptr;
-    case RS2_EXTENSION_TM2_SENSOR          : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::tm2_sensor_interface)   != nullptr;
-    case RS2_EXTENSION_COLOR_SENSOR        : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::color_sensor)           != nullptr;
-    case RS2_EXTENSION_MOTION_SENSOR       : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::motion_sensor)          != nullptr;
-    case RS2_EXTENSION_FISHEYE_SENSOR      : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::fisheye_sensor)         != nullptr;
-    case RS2_EXTENSION_CALIBRATED_SENSOR   : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::calibrated_sensor)      != nullptr;
+    case RS2_EXTENSION_DEBUG                   : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::debug_interface)        != nullptr;
+    case RS2_EXTENSION_INFO                    : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::info_interface)         != nullptr;
+    case RS2_EXTENSION_OPTIONS                 : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::options_interface)      != nullptr;
+    case RS2_EXTENSION_VIDEO                   : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::video_sensor_interface) != nullptr;
+    case RS2_EXTENSION_ROI                     : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::roi_sensor_interface)   != nullptr;
+    case RS2_EXTENSION_DEPTH_SENSOR            : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::depth_sensor)           != nullptr;
+    case RS2_EXTENSION_DEPTH_STEREO_SENSOR     : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::depth_stereo_sensor)    != nullptr;
+    case RS2_EXTENSION_SOFTWARE_SENSOR         : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::software_sensor)        != nullptr;
+    case RS2_EXTENSION_POSE_SENSOR             : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::pose_sensor_interface)  != nullptr;
+    case RS2_EXTENSION_WHEEL_ODOMETER          : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::wheel_odometry_interface)!= nullptr;
+    case RS2_EXTENSION_TM2_SENSOR              : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::tm2_sensor_interface)   != nullptr;
+    case RS2_EXTENSION_COLOR_SENSOR            : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::color_sensor)           != nullptr;
+    case RS2_EXTENSION_MOTION_SENSOR           : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::motion_sensor)          != nullptr;
+    case RS2_EXTENSION_FISHEYE_SENSOR          : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::fisheye_sensor)         != nullptr;
+    case RS2_EXTENSION_CALIBRATED_SENSOR       : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::calibrated_sensor)      != nullptr;
+    case RS2_EXTENSION_MAX_USABLE_RANGE_SENSOR : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::max_usable_range_sensor)!= nullptr;
+    case RS2_EXTENSION_DEBUG_STREAM_SENSOR     : return VALIDATE_INTERFACE_NO_THROW(sensor->sensor, librealsense::debug_stream_sensor )   != nullptr;
+
 
     default:
         return false;
@@ -1424,6 +1449,7 @@ int rs2_is_device_extendable_to(const rs2_device* dev, rs2_extension extension, 
         case RS2_EXTENSION_DEVICE_CALIBRATION    : return VALIDATE_INTERFACE_NO_THROW(dev->device, librealsense::device_calibration)          != nullptr;
         case RS2_EXTENSION_SERIALIZABLE          : return VALIDATE_INTERFACE_NO_THROW(dev->device, librealsense::serializable_interface)      != nullptr;
         case RS2_EXTENSION_FW_LOGGER             : return VALIDATE_INTERFACE_NO_THROW(dev->device, librealsense::firmware_logger_extensions)  != nullptr;
+        case RS2_EXTENSION_CALIBRATION_CHANGE_DEVICE: return VALIDATE_INTERFACE_NO_THROW(dev->device, librealsense::calibration_change_device)  != nullptr;
 
         default:
             return false;
@@ -1466,6 +1492,8 @@ int rs2_is_processing_block_extendable_to(const rs2_processing_block* f, rs2_ext
     case RS2_EXTENSION_HOLE_FILLING_FILTER: return VALIDATE_INTERFACE_NO_THROW((processing_block_interface*)(f->block.get()), librealsense::hole_filling_filter) != nullptr;
     case RS2_EXTENSION_ZERO_ORDER_FILTER: return VALIDATE_INTERFACE_NO_THROW((processing_block_interface*)(f->block.get()), librealsense::zero_order) != nullptr;
     case RS2_EXTENSION_DEPTH_HUFFMAN_DECODER: return VALIDATE_INTERFACE_NO_THROW((processing_block_interface*)(f->block.get()), librealsense::depth_decompression_huffman) != nullptr;
+    case RS2_EXTENSION_HDR_MERGE: return VALIDATE_INTERFACE_NO_THROW((processing_block_interface*)(f->block.get()), librealsense::hdr_merge) != nullptr;
+    case RS2_EXTENSION_SEQUENCE_ID_FILTER: return VALIDATE_INTERFACE_NO_THROW((processing_block_interface*)(f->block.get()), librealsense::sequence_id_filter) != nullptr;
   
     default:
         return false;
@@ -2265,12 +2293,38 @@ rs2_processing_block* rs2_create_huffman_depth_decompress_block(rs2_error** erro
 }
 NOARGS_HANDLE_EXCEPTIONS_AND_RETURN(nullptr)
 
+rs2_processing_block* rs2_create_hdr_merge_processing_block(rs2_error** error) BEGIN_API_CALL
+{
+    auto block = std::make_shared<librealsense::hdr_merge>();
+
+    return new rs2_processing_block{ block };
+}
+NOARGS_HANDLE_EXCEPTIONS_AND_RETURN(nullptr)
+
+rs2_processing_block* rs2_create_sequence_id_filter(rs2_error** error) BEGIN_API_CALL
+{
+    auto block = std::make_shared<librealsense::sequence_id_filter>();
+
+    return new rs2_processing_block{ block };
+}
+NOARGS_HANDLE_EXCEPTIONS_AND_RETURN(nullptr)
+
 float rs2_get_depth_scale(rs2_sensor* sensor, rs2_error** error) BEGIN_API_CALL
 {
     VALIDATE_NOT_NULL(sensor);
     auto ds = VALIDATE_INTERFACE(sensor->sensor, librealsense::depth_sensor);
     return ds->get_depth_scale();
 }
+HANDLE_EXCEPTIONS_AND_RETURN(0.f, sensor)
+
+float rs2_get_max_usable_depth_range(rs2_sensor const * sensor, rs2_error** error) BEGIN_API_CALL
+{
+    VALIDATE_NOT_NULL(sensor);
+
+    auto murs = VALIDATE_INTERFACE(sensor->sensor, librealsense::max_usable_range_sensor);
+    return murs->get_max_usable_depth_range();
+}
+
 HANDLE_EXCEPTIONS_AND_RETURN(0.f, sensor)
 
 float rs2_get_stereo_baseline(rs2_sensor* sensor, rs2_error** error) BEGIN_API_CALL
@@ -2344,6 +2398,26 @@ void rs2_pose_frame_get_pose_data(const rs2_frame* frame, rs2_pose* pose, rs2_er
     pose->mapper_confidence = pf->get_mapper_confidence();
 }
 HANDLE_EXCEPTIONS_AND_RETURN(, frame, pose)
+
+void rs2_extract_target_dimensions(const rs2_frame* frame_ref, rs2_calib_target_type calib_type, float* target_dims, unsigned int target_dims_size, rs2_error** error) BEGIN_API_CALL
+{
+    VALIDATE_NOT_NULL(frame_ref);
+    VALIDATE_NOT_NULL(target_dims_size);
+
+    auto vf = VALIDATE_INTERFACE(((frame_interface*)frame_ref), librealsense::video_frame);
+    if (vf->get_stream()->get_format() != RS2_FORMAT_Y8)
+        throw std::runtime_error("wrong video frame format");
+
+    std::shared_ptr<target_calculator_interface> target_calculator;
+    if (calib_type == RS2_CALIB_TARGET_RECT_GAUSSIAN_DOT_VERTICES)
+        target_calculator = std::make_shared<rect_gaussian_dots_target_calculator>(vf->get_width(), vf->get_height());
+    else
+        throw std::runtime_error("unsupported calibration target type");
+
+    if (!target_calculator->calculate(vf->get_frame_data(), target_dims, target_dims_size))
+        throw std::runtime_error("Failed to find the four rectangle side sizes on the frame");
+}
+HANDLE_EXCEPTIONS_AND_RETURN(, frame_ref, calib_type, target_dims, target_dims_size)
 
 rs2_time_t rs2_get_time(rs2_error** error) BEGIN_API_CALL
 {
@@ -2844,9 +2918,7 @@ void rs2_update_firmware_cpp(const rs2_device* device, const void* fw_image, int
 {
     VALIDATE_NOT_NULL(device);
     VALIDATE_NOT_NULL(fw_image);
-
-    if(fw_image_size <= 0)
-        throw std::runtime_error("invlid firmware image size provided to rs2_update_cpp");
+    VALIDATE_FIXED_SIZE(fw_image_size, signed_fw_size); // check if the given FW size matches the expected FW size
 
     auto fwu = VALIDATE_INTERFACE(device->device, librealsense::update_device_interface);
 
@@ -2861,6 +2933,7 @@ void rs2_update_firmware(const rs2_device* device, const void* fw_image, int fw_
 {
     VALIDATE_NOT_NULL(device);
     VALIDATE_NOT_NULL(fw_image);
+    VALIDATE_FIXED_SIZE(fw_image_size, signed_fw_size); // check if the given FW size matches the expected FW size
 
     if (fw_image_size <= 0)
         throw std::runtime_error("invlid firmware image size provided to rs2_update");
@@ -2924,9 +2997,7 @@ void rs2_update_firmware_unsigned_cpp(const rs2_device* device, const void* imag
 {
     VALIDATE_NOT_NULL(device);
     VALIDATE_NOT_NULL(image);
-
-    if (image_size <= 0)
-        throw std::runtime_error("invlid firmware image size provided to rs2_update_firmware_unsigned_cpp");
+    VALIDATE_FIXED_SIZE(image_size, unsigned_fw_size); // check if the given FW size matches the expected FW size
 
     auto fwud = std::dynamic_pointer_cast<updatable>(device->device);
     if (!fwud)
@@ -2945,6 +3016,7 @@ void rs2_update_firmware_unsigned(const rs2_device* device, const void* image, i
 {
     VALIDATE_NOT_NULL(device);
     VALIDATE_NOT_NULL(image);
+    VALIDATE_FIXED_SIZE(image_size, unsigned_fw_size); // check if the given FW size matches the expected FW size
 
     if (image_size <= 0)
         throw std::runtime_error("invlid firmware image size provided to rs2_update_firmware_unsigned");
@@ -3114,7 +3186,7 @@ HANDLE_EXCEPTIONS_AND_RETURN(, dev, json_content, content_size)
 rs2_firmware_log_message* rs2_create_fw_log_message(rs2_device* dev, rs2_error** error)BEGIN_API_CALL
 {
     VALIDATE_NOT_NULL(dev);
-    auto fw_loggerable = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
     
     return new rs2_firmware_log_message{ std::make_shared <librealsense::fw_logs::fw_logs_binary_data>() };
 }
@@ -3124,10 +3196,10 @@ int rs2_get_fw_log(rs2_device* dev, rs2_firmware_log_message* fw_log_msg, rs2_er
 {
     VALIDATE_NOT_NULL(dev);
     VALIDATE_NOT_NULL(fw_log_msg);
-    auto fw_loggerable = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
 
     fw_logs::fw_logs_binary_data binary_data;
-    bool result = fw_loggerable->get_fw_log(binary_data);
+    bool result = fw_logger->get_fw_log(binary_data);
     if (result)
     {
         *(fw_log_msg->firmware_log_binary_data).get() = binary_data;
@@ -3140,10 +3212,10 @@ int rs2_get_flash_log(rs2_device* dev, rs2_firmware_log_message* fw_log_msg, rs2
 {
     VALIDATE_NOT_NULL(dev);
     VALIDATE_NOT_NULL(fw_log_msg);
-    auto fw_loggerable = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
 
     fw_logs::fw_logs_binary_data binary_data;
-    bool result = fw_loggerable->get_flash_log(binary_data);
+    bool result = fw_logger->get_flash_log(binary_data);
     if (result)
     {
         *(fw_log_msg->firmware_log_binary_data).get() = binary_data;
@@ -3168,7 +3240,7 @@ HANDLE_EXCEPTIONS_AND_RETURN(nullptr, msg)
 int rs2_fw_log_message_size(rs2_firmware_log_message* msg, rs2_error** error)BEGIN_API_CALL
 {
     VALIDATE_NOT_NULL(msg);
-    return msg->firmware_log_binary_data->logs_buffer.size();
+    return (int)msg->firmware_log_binary_data->logs_buffer.size();
 }
 HANDLE_EXCEPTIONS_AND_RETURN(0, msg)
 
@@ -3189,9 +3261,9 @@ int rs2_init_fw_log_parser(rs2_device* dev, const char* xml_content,rs2_error** 
 {
     VALIDATE_NOT_NULL(xml_content);
     
-    auto fw_loggerable = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
 
-    return (fw_loggerable->init_parser(xml_content)) ? 1 : 0;
+    return (fw_logger->init_parser(xml_content)) ? 1 : 0;
 }
 HANDLE_EXCEPTIONS_AND_RETURN(0, xml_content)
 
@@ -3199,7 +3271,7 @@ rs2_firmware_log_parsed_message* rs2_create_fw_log_parsed_message(rs2_device* de
 {
     VALIDATE_NOT_NULL(dev);
 
-    auto fw_loggerable = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
 
     return new rs2_firmware_log_parsed_message{ std::make_shared <librealsense::fw_logs::fw_log_data>() };
 }
@@ -3211,14 +3283,23 @@ int rs2_parse_firmware_log(rs2_device* dev, rs2_firmware_log_message* fw_log_msg
     VALIDATE_NOT_NULL(fw_log_msg);
     VALIDATE_NOT_NULL(parsed_msg);
 
-    auto fw_loggerable = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
 
-    bool parsing_result = fw_loggerable->parse_log(fw_log_msg->firmware_log_binary_data.get(),
+    bool parsing_result = fw_logger->parse_log(fw_log_msg->firmware_log_binary_data.get(),
         parsed_msg->firmware_log_parsed.get());
 
     return parsing_result ? 1 : 0;
 }
 HANDLE_EXCEPTIONS_AND_RETURN(0, dev, fw_log_msg)
+
+unsigned int rs2_get_number_of_fw_logs(rs2_device* dev, rs2_error** error) BEGIN_API_CALL
+{
+    VALIDATE_NOT_NULL(dev);
+
+    auto fw_logger = VALIDATE_INTERFACE(dev->device, librealsense::firmware_logger_extensions);
+    return fw_logger->get_number_of_fw_logs();
+}
+HANDLE_EXCEPTIONS_AND_RETURN(0, dev)
 
 void rs2_delete_fw_log_parsed_message(rs2_firmware_log_parsed_message* fw_log_parsed_msg) BEGIN_API_CALL
 {
@@ -3269,6 +3350,12 @@ unsigned int rs2_get_fw_log_parsed_timestamp(rs2_firmware_log_parsed_message* fw
 }
 HANDLE_EXCEPTIONS_AND_RETURN(0, fw_log_parsed_msg)
 
+unsigned int rs2_get_fw_log_parsed_sequence_id(rs2_firmware_log_parsed_message* fw_log_parsed_msg, rs2_error** error) BEGIN_API_CALL
+{
+    VALIDATE_NOT_NULL(fw_log_parsed_msg);
+    return fw_log_parsed_msg->firmware_log_parsed->get_sequence_id();
+}
+HANDLE_EXCEPTIONS_AND_RETURN(0, fw_log_parsed_msg)
 
 rs2_terminal_parser* rs2_create_terminal_parser(const char* xml_content, rs2_error** error) BEGIN_API_CALL
 {
@@ -3320,6 +3407,4 @@ rs2_raw_data_buffer* rs2_terminal_parse_response(rs2_terminal_parser* terminal_p
     return new rs2_raw_data_buffer{ result };
 }
 HANDLE_EXCEPTIONS_AND_RETURN(nullptr, terminal_parser, command, response)
-
-
 

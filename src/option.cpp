@@ -1,9 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 // Copyright(c) 2015 Intel Corporation. All Rights Reserved.
-
 #include "option.h"
 #include "sensor.h"
-#include "error-handling.h"
 
 bool librealsense::option_base::is_valid(float value) const
 {
@@ -142,20 +140,24 @@ std::vector<uint8_t> librealsense::command_transfer_over_xu::send_receive(const 
         });
 }
 
+librealsense::polling_errors_disable::~polling_errors_disable()
+{
+    if (auto handler = _polling_error_handler.lock())
+        handler->stop();
+}
+
 void librealsense::polling_errors_disable::set(float value)
 {
-    if (value < 0)
-        throw invalid_value_exception("Invalid polling errors disable request " + std::to_string(value));
+    if( value < 0 )
+        throw invalid_value_exception("invalid polling errors value " + std::to_string(value));
 
-    if (value == 0)
+    if( auto handler = _polling_error_handler.lock() )
     {
-        _polling_error_handler->stop();
-        _value = 0;
-    }
-    else
-    {
-        _polling_error_handler->start();
-        _value = 1;
+        _value = value;
+        if( value <= std::numeric_limits< float >::epsilon() )
+            handler->stop();
+        else
+            handler->start(( unsigned int )( value * 1000.f ));
     }
     _recording_function(*this);
 }
